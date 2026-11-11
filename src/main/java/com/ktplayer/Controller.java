@@ -5,6 +5,7 @@ import org.jaudiotagger.audio.AudioFile;
 import org.jaudiotagger.audio.AudioFileIO;
 import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.Tag;
+import org.jaudiotagger.tag.images.Artwork;
 
 import javafx.animation.FadeTransition;
 import javafx.application.Platform;
@@ -32,14 +33,19 @@ import javafx.stage.Stage;
 import javafx.util.Duration;
 import javafx.scene.media.MediaPlayer.Status;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URL;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -137,6 +143,19 @@ public class Controller {
     private FadeTransition fadeIn = new FadeTransition();
     private FadeTransition fadeOut = new FadeTransition();
 
+    // Album art is drawn in an ImageView inside imagePane (not as the pane's CSS background,
+    // because the #imagePane rules in LightTheme.css would override a background set from code)
+    private final ImageView albumArtView = new ImageView();
+    private Image placeholderArt;
+    // Decoded covers keyed by song path (or folder path for folder images). A null value means
+    // "looked, found nothing". Capped so browsing a huge library doesn't keep every cover in memory.
+    private final Map<String, Image> albumArtCache = new LinkedHashMap<String, Image>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Image> eldest) {
+            return size() > ALBUM_ART_CACHE_SIZE;
+        }
+    };
+
 
     public Controller() {
         players = new ArrayList<>();
@@ -149,6 +168,7 @@ public class Controller {
 
     @FXML
     private void initialize() throws Exception {
+        setUpAlbumArtView();
 
         window.addEventHandler(MouseEvent.MOUSE_PRESSED, new EventHandler<MouseEvent>() {
             @Override
@@ -256,11 +276,13 @@ public class Controller {
             artistName.setText(song.getArtistName());
             songName.setText(song.getSongName());
             albumName.setText(song.getFormat());
+            showAlbumArt(new File(song.getUrl()));
         }
         else {
             artistName.setText("-");
             songName.setText("-");
             albumName.setText("-");
+            showAlbumArt(null);
         }
 
     }
@@ -298,7 +320,7 @@ public class Controller {
                 }
             }
         }
-        setImage();
+        showAlbumArt(null); // new folder loaded, nothing selected yet - show the placeholder
         i = 0;
         System.out.println(players.size());
         songsCounter.setText("");
@@ -494,6 +516,7 @@ public class Controller {
         artistName.setText(tagOr(tag, FieldKey.ARTIST, "Unknown"));
         songName.setText(tagOr(tag, FieldKey.TITLE, stripExtension(file.getName())));
         albumName.setText(tagOr(tag, FieldKey.ALBUM, "-"));
+        showAlbumArt(file);
     }
 
     // Formats JavaFX's MediaPlayer can actually play. jaudiotagger can read tags from more
@@ -620,18 +643,106 @@ public class Controller {
         transitionOperation(anchorPane, fadeOut, false);
     }
 
-    private void setImage() throws Exception {
-        String path = "";
-        path = path.replace("\\", "/");
-        path = path.replace(" ", "%20");
-        //path = "file:/" + path;
-        path = ClassLoader.getSystemResource("images/Question.PNG").toExternalForm();
-        System.out.println(path);
+    // ---------------------------------------------------------------- Album art
 
-        imagePane.setStyle("-fx-background-image: url(\"" + path + "\"); " +
-                "-fx-background-position: center center; " +
-                "-fx-background-repeat: stretch;");
+    private static final int ALBUM_ART_SIZE = 300;        // decode size in px (pane is ~105px; extra is for HiDPI)
+    private static final int ALBUM_ART_CACHE_SIZE = 100;  // max covers kept in memory
+    // Image files looked for next to the song when it has no embedded cover, in priority order
+    private static final List<String> FOLDER_ART_NAMES = Arrays.asList("cover", "folder", "front", "album");
+    private static final List<String> FOLDER_ART_EXTENSIONS = Arrays.asList("jpg", "jpeg", "png");
 
+    // Puts the ImageView into imagePane, scaled to fit and kept centred
+    private void setUpAlbumArtView() {
+        placeholderArt = new Image(ClassLoader.getSystemResource("images/Question.PNG").toExternalForm());
+        albumArtView.setPreserveRatio(true);
+        albumArtView.setSmooth(true);
+        albumArtView.fitWidthProperty().bind(imagePane.widthProperty());
+        albumArtView.fitHeightProperty().bind(imagePane.heightProperty());
+        // A plain Pane doesn't centre its children, so re-centre whenever either size changes
+        InvalidationListener centre = observable -> centreAlbumArt();
+        albumArtView.layoutBoundsProperty().addListener(centre);
+        imagePane.widthProperty().addListener(centre);
+        imagePane.heightProperty().addListener(centre);
+        imagePane.getChildren().add(albumArtView);
+        showAlbumArt(null);
+    }
+
+    private void centreAlbumArt() {
+        Bounds b = albumArtView.getLayoutBounds();
+        albumArtView.relocate((imagePane.getWidth() - b.getWidth()) / 2,
+                              (imagePane.getHeight() - b.getHeight()) / 2);
+    }
+
+    // Shows the cover for this audio file, or the placeholder if it has none (or file is null)
+    private void showAlbumArt(File audioFile) {
+        Image art = (audioFile == null) ? null : loadAlbumArt(audioFile);
+        albumArtView.setImage(art != null ? art : placeholderArt);
+    }
+
+    // Embedded cover first, then a cover/folder image in the same folder. Results are cached.
+    private Image loadAlbumArt(File audioFile) {
+        String key = audioFile.getAbsolutePath();
+        if (albumArtCache.containsKey(key)) {
+            return albumArtCache.get(key);
+        }
+        Image art = readEmbeddedArt(audioFile);
+        if (art == null) {
+            art = loadFolderArt(audioFile.getParentFile());
+        }
+        albumArtCache.put(key, art);
+        return art;
+    }
+
+    // Cached per folder, so every song in an album shares one decoded image
+    private Image loadFolderArt(File folder) {
+        if (folder == null) return null;
+        String key = "folder:" + folder.getAbsolutePath();
+        if (albumArtCache.containsKey(key)) {
+            return albumArtCache.get(key);
+        }
+        Image art = readFolderArt(folder);
+        albumArtCache.put(key, art);
+        return art;
+    }
+
+    private static Image readEmbeddedArt(File audioFile) {
+        try {
+            Tag tag = AudioFileIO.read(audioFile).getTag();
+            if (tag == null) return null;
+            Artwork artwork = tag.getFirstArtwork();
+            if (artwork == null || artwork.getBinaryData() == null) return null; // none, or only a URL link
+            return decodeArt(new ByteArrayInputStream(artwork.getBinaryData()));
+        }
+        catch (Exception e) { // unreadable file, or a format whose tag doesn't support artwork
+            return null;
+        }
+    }
+
+    private static Image readFolderArt(File folder) {
+        File[] files = folder.listFiles();
+        if (files == null) return null;
+        for (String name : FOLDER_ART_NAMES) {
+            for (String extension : FOLDER_ART_EXTENSIONS) {
+                String wanted = name + "." + extension;
+                for (File file : files) {
+                    if (file.isFile() && file.getName().equalsIgnoreCase(wanted)) {
+                        try (InputStream in = new FileInputStream(file)) {
+                            Image art = decodeArt(in);
+                            if (art != null) return art;
+                        }
+                        catch (IOException e) { /* unreadable - try the next candidate */ }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    // Decodes straight to ALBUM_ART_SIZE so large embedded covers don't sit in memory full size.
+    // Returns null if the bytes aren't a valid image.
+    private static Image decodeArt(InputStream in) {
+        Image image = new Image(in, ALBUM_ART_SIZE, ALBUM_ART_SIZE, true, true);
+        return image.isError() ? null : image;
     }
 
     private void repeatSongs(){
