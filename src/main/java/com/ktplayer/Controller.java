@@ -7,8 +7,10 @@ import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.Tag;
 import org.jaudiotagger.tag.images.Artwork;
 
+import javafx.animation.Animation;
 import javafx.animation.FadeTransition;
-import javafx.application.Platform;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
 import javafx.beans.InvalidationListener;
 import javafx.beans.Observable;
 import javafx.beans.binding.Bindings;
@@ -269,6 +271,110 @@ public class Controller {
                 }
             }
         });
+
+        setUpPlaybackControls();
+        setUpVolumeSlider();
+        startProgressUpdates();
+    }
+
+    // True once a song has been clicked, so the playback controls have something to act on
+    private boolean hasSong() {
+        return mediaView != null && mediaView.getMediaPlayer() != null;
+    }
+
+    // Playback button handlers. Added once here - they act on whichever song is currently loaded.
+    private void setUpPlaybackControls() {
+        playButton.addEventHandler(MouseEvent.MOUSE_CLICKED, event -> {
+            if(!hasSong()) return;
+            mediaView.getMediaPlayer().play();
+            playIcon();
+            for (int i = ((players.indexOf(mediaView.getMediaPlayer())) % players.size()); i < players.size(); i++) {
+                final MediaPlayer player = players.get(i);
+                mediaPlayer = player;
+                final MediaPlayer nextPlayer = players.get((i + 1) % players.size());
+                mediaPlayer.setOnEndOfMedia(new Runnable() {
+                    @Override
+                    public void run() {
+                        mediaView.getMediaPlayer().stop();
+                        mediaView.getMediaPlayer().seek(Duration.ZERO);
+                        if(isAutoplay) {
+                            mediaView.getMediaPlayer().seek(Duration.ZERO);
+                            repeatSongs();
+                            return;
+                        }
+                        mediaPlayer = nextPlayer;
+                        mediaView.setMediaPlayer(mediaPlayer);
+                        mediaView.getMediaPlayer().seek(Duration.ZERO);
+                        updateSliderPosition(Duration.ZERO);
+                        songSlider.setValue(0);
+                        mediaPlayer.setVolume(volume);
+                        mediaPlayer.play();
+                        playIcon();
+                    }
+                });
+            }
+        });
+
+        pauseButton.addEventHandler(MouseEvent.MOUSE_CLICKED, event -> {
+            if(hasSong() && mediaView.getMediaPlayer().getStatus() == MediaPlayer.Status.PLAYING) {
+                mediaView.getMediaPlayer().pause();
+                pauseIcon();
+            }
+        });
+
+        nextSongButton.addEventHandler(MouseEvent.MOUSE_CLICKED, event -> {
+            if(!hasSong()) return;
+            seekAndUpdate(mediaView.getMediaPlayer().getTotalDuration());
+        });
+
+        previousSongButton.addEventHandler(MouseEvent.MOUSE_CLICKED, event -> {
+            if(!hasSong()) return;
+            seekAndUpdate(Duration.ZERO);
+        });
+
+        songSlider.setValueFactory(slider ->
+                Bindings.createStringBinding(
+                        () -> hasSong() ? secToMin((long) mediaView.getMediaPlayer().getCurrentTime().toSeconds()) : "0:00",
+                        songSlider.valueProperty()
+                )
+        );
+        songSlider.addEventHandler(MouseEvent.MOUSE_PRESSED, event -> {
+            if(!hasSong()) return;
+            Bounds b1 = songSlider.getLayoutBounds();
+            double mouseX = event.getX();
+            double percent = (((b1.getMinX() + mouseX) * 100) / (b1.getMaxX() - b1.getMinX()));
+            songSlider.setValue((percent) / 100);
+            seekAndUpdate(new Duration(mediaView.getMediaPlayer().getTotalDuration().toMillis() * percent / 100));
+        });
+    }
+
+    // Volume slider listener. Added once; applies to the current song if there is one.
+    private void setUpVolumeSlider() {
+        volumeSlider.valueProperty().addListener(observable -> {
+            volume = volumeSlider.getValue() / 100;
+            if(hasSong()) {
+                mediaView.getMediaPlayer().setVolume(volume);
+            }
+            volumeValue.setText(String.valueOf((int)volumeSlider.getValue()));
+            volumeIconChanger();
+        });
+    }
+
+    // Refreshes the time labels and song slider 10 times a second, on the JavaFX thread.
+    // One Timeline for the whole app - stops automatically when the app exits.
+    private void startProgressUpdates() {
+        Timeline progress = new Timeline(new KeyFrame(Duration.millis(100), event -> {
+            if(!hasSong()) return;
+            final MediaPlayer player = mediaView.getMediaPlayer();
+            if((player.getStatus() != Status.PAUSED) && (player.getStatus() != Status.STOPPED) && (player.getStatus() != Status.READY)) {
+                double tduration = player.getTotalDuration().toSeconds();
+                totalDuration.setText(secToMin((long) tduration));
+                currentDuration.setText(secToMin((long) player.getCurrentTime().toSeconds()));
+                updateSliderPosition(player.getCurrentTime());
+            }
+        }));
+        progress.setCycleCount(Animation.INDEFINITE);
+        progress.play();
     }
 
     public void showSongInfo(Song song) {
@@ -357,90 +463,17 @@ public class Controller {
             mediaView.getMediaPlayer().seek(Duration.ZERO);
             updateSliderPosition(Duration.ZERO);
 
-            updateValues();
             mediaView.mediaPlayerProperty().addListener(new ChangeListener<MediaPlayer>() {
                 @Override
                 public void changed(ObservableValue<? extends MediaPlayer> observable, MediaPlayer oldValue, MediaPlayer newValue) {
                     try {
                         setCurrentlyPlayer(newValue);
-                        updateValues();
                     }
                     catch(Exception e) {
                         System.out.println(e.toString());
                     }
                 }
             });
-
-
-            playButton.addEventHandler(MouseEvent.MOUSE_CLICKED, new EventHandler<MouseEvent>() {
-                @Override
-                public void handle(MouseEvent event) {
-                    mediaView.getMediaPlayer().play();
-                    playIcon();
-                    updateValues();
-                    for (int i = ((players.indexOf(mediaView.getMediaPlayer())) % players.size()); i < players.size(); i++) {
-                        final MediaPlayer player = players.get(i);
-                        mediaPlayer = player;
-                        final MediaPlayer nextPlayer = players.get((i + 1) % players.size());
-                        mediaPlayer.setOnEndOfMedia(new Runnable() {
-                            @Override
-                            public void run() {
-                                mediaView.getMediaPlayer().stop();
-                                mediaView.getMediaPlayer().seek(Duration.ZERO);
-                                if(isAutoplay) {
-                                    mediaView.getMediaPlayer().seek(Duration.ZERO);
-                                    repeatSongs();
-                                    return;
-                                }
-                                mediaPlayer = nextPlayer;
-                                mediaView.setMediaPlayer(mediaPlayer);
-                                mediaView.getMediaPlayer().seek(Duration.ZERO);
-                                updateSliderPosition(Duration.ZERO);
-                                songSlider.setValue(0);
-                                updateValues();
-                                mediaPlayer.setVolume(volume);
-                                mediaPlayer.play();
-                                playIcon();
-                            }
-                        });
-                        pauseSong();
-                    }
-                }
-            });
-
-            nextSongButton.addEventHandler(MouseEvent.MOUSE_CLICKED, new EventHandler<MouseEvent>() {
-                @Override
-                public void handle(MouseEvent event) {
-                    seekAndUpdate(players.get(players.indexOf(mediaView.getMediaPlayer())).getTotalDuration());
-                }
-            });
-
-            previousSongButton.addEventHandler(MouseEvent.MOUSE_CLICKED, new EventHandler<MouseEvent>() {
-                @Override
-                public void handle(MouseEvent event) {
-                    seekAndUpdate(Duration.ZERO);
-                }
-            });
-
-
-
-            songSlider.addEventHandler(MouseEvent.MOUSE_PRESSED, new EventHandler<MouseEvent>() {
-                @Override
-                public void handle(MouseEvent event) {
-                    Bounds b1 = songSlider.getLayoutBounds();
-                    double mouseX = event.getX();
-                    double percent = (((b1.getMinX() + mouseX) * 100) / (b1.getMaxX() - b1.getMinX()));
-                    songSlider.setValue((percent) / 100);
-                    seekAndUpdate(new Duration(mediaView.getMediaPlayer().getTotalDuration().toMillis() * percent / 100));
-                    songSlider.setValueFactory(slider ->
-                            Bindings.createStringBinding(
-                                    () -> (secToMin((long) mediaView.getMediaPlayer().getCurrentTime().toSeconds())),
-                                    songSlider.valueProperty()
-                            )
-                    );
-                }
-            });
-
         }
         else {
             if(pauseButton.isVisible()) {
@@ -562,36 +595,6 @@ public class Controller {
         player.seek(duration);
     }
 
-    private void updateValues() {
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                do {
-                    Platform.runLater(new Runnable() {
-                        @Override
-                        public void run() {
-                            final MediaPlayer player = mediaView.getMediaPlayer();
-                            if((player.getStatus() != Status.PAUSED) && (player.getStatus() != Status.STOPPED) && (player.getStatus() != Status.READY)) {
-                                double tduration = player.getTotalDuration().toSeconds();
-                                totalDuration.setText(secToMin((long) tduration));
-                                currentDuration.setText(secToMin((long) player.getCurrentTime().toSeconds()));
-                                updateSliderPosition(player.getCurrentTime());
-                                volumeHandler();
-                            }
-                        }
-                    });
-                    try {
-                        Thread.sleep(100);
-                    } catch (InterruptedException ex) {
-                        break;
-                    }
-                }
-                while(!players.isEmpty());
-            }
-        });
-        thread.start();
-    }
-
     private void updateSliderPosition(Duration currentTime) {
         final MediaPlayer player = mediaView.getMediaPlayer();
         final Duration totalDuration = player.getTotalDuration();
@@ -601,18 +604,6 @@ public class Controller {
         else {
             songSlider.setValue((currentTime.toMillis() / totalDuration.toMillis()) * 100);
         }
-    }
-
-    private void volumeHandler() {
-        volumeSlider.valueProperty().addListener(new InvalidationListener() {
-            @Override
-            public void invalidated(Observable observable) {
-                mediaView.getMediaPlayer().setVolume(volumeSlider.getValue() / 100);
-                volumeValue.setText(String.valueOf((int)volumeSlider.getValue()));
-                volume = mediaView.getMediaPlayer().getVolume();
-                volumeIconChanger();
-            }
-        });
     }
 
     private void volumeIconChanger() {
@@ -757,22 +748,6 @@ public class Controller {
             playIcon();
         }
         else return;
-    }
-
-    private void pauseSong() {
-        mediaView.getMediaPlayer().setAutoPlay(true);
-        pauseButton.addEventHandler(MouseEvent.MOUSE_CLICKED, new EventHandler<MouseEvent>() {
-            @Override
-            public void handle(MouseEvent event) {
-                if (mediaView.getMediaPlayer().getStatus() == MediaPlayer.Status.PLAYING) {
-                    mediaView.getMediaPlayer().pause();
-                    pauseButton.setVisible(false);
-                    pauseButton.setDisable(true);
-                    playButton.setVisible(true);
-                    playButton.setDisable(false);
-                }
-            }
-        });
     }
 }
 
